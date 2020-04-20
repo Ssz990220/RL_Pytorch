@@ -17,11 +17,11 @@ episode = 50
 step_limit = 5000
 gamma = 0.5
 batch_size = 128
-
+TARGET_UPDATE_RATE = 10
 
 class DQN(nn.Module):
 
-    def __init__(self,state_size, action_size):
+    def __init__(self, state_size, action_size):
         super(DQN, self).__init__()
         layers = [nn.Linear(state_size, 32, bias=False), nn.Linear(32, 32, bias=False),
                   nn.Linear(32, action_size, bias=False)]
@@ -115,12 +115,14 @@ def plot_durations():
 
     plt.pause(0.001)  # pause a bit so that plots are updated
 
+
 net = DQN(state_size, action_size)
+target = DQN(state_size, action_size)
 memo = Memory(memo_size)
-optimizer = optim.Adam(net.net.parameters(),lr)
+optimizer = optim.RMSprop(net.net.parameters())
 
 
-def batch_train(net, memo, batch_size):
+def batch_train(net, target_net, memo, batch_size):
     state, action, reward, next_state, done = memo.get_batch_memory(batch_size)
     done = np.squeeze(done)
     done_mask_idx = ((done == 1))
@@ -129,9 +131,9 @@ def batch_train(net, memo, batch_size):
     y[done_mask_idx] = torch.as_tensor(reward[done_mask_idx], dtype=torch.float32)
     with torch.no_grad():
         y[undone_mask_idx] = torch.as_tensor(reward[undone_mask_idx], dtype=torch.float32) + (
-        torch.max(gamma * net.evaluate(next_state[undone_mask_idx, :]), 1)[0]).unsqueeze(1)
+            torch.max(gamma * target_net.evaluate(next_state[undone_mask_idx, :]), 1)[0]).unsqueeze(1)
     state_action_value = net.evaluate(state).gather(1, torch.as_tensor(action, dtype=torch.long))
-    loss = -F.smooth_l1_loss(state_action_value, y)
+    loss = torch.sum((state_action_value-y)*(state_action_value-y))
 
     optimizer.zero_grad()
     loss.backward()
@@ -142,6 +144,8 @@ def batch_train(net, memo, batch_size):
     # loss_step = loss-loss_after
 
 
+target.load_state_dict(net.state_dict())
+
 memo.fill_memo()
 for i in range(5000):
     state = env.reset()
@@ -149,6 +153,8 @@ for i in range(5000):
     episode_reward = 0
     step_count = 0
     start_record = False
+    if i % TARGET_UPDATE_RATE ==0:
+        target.load_state_dict(net.state_dict())
     while True:
         with torch.no_grad():
             q_table = net.evaluate(state)
@@ -164,7 +170,7 @@ for i in range(5000):
         if step_count > step_limit:
             break
         if memo.ready:
-            batch_train(net, memo, batch_size)
+            batch_train(net, target, memo, batch_size)
             start_record = True
     if start_record:
         episode_durations.append(step_count)

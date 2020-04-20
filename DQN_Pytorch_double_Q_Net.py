@@ -153,8 +153,6 @@ for i in range(5000):
     episode_reward = 0
     step_count = 0
     start_record = False
-    if i % TARGET_UPDATE_RATE ==0:
-        target.load_state_dict(net.state_dict())
     while True:
         with torch.no_grad():
             q_table = net.evaluate(state)
@@ -165,6 +163,8 @@ for i in range(5000):
         memo.store(state, action, reward, next_state, done)
         state = next_state
         step_count += 1
+        if step_count % TARGET_UPDATE_RATE == 0:
+            target.load_state_dict(net.state_dict())
         if done:
             break
         if step_count > step_limit:

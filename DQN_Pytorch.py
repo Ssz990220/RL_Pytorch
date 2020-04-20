@@ -15,13 +15,13 @@ epsilon = 0.9
 memo_size = 10000
 episode = 50
 step_limit = 5000
-gamma = 0.999
-batch_size = 32
+gamma = 0.5
+batch_size = 128
 
 
 class DQN(nn.Module):
 
-    def __init__(self):
+    def __init__(self,state_size, action_size):
         super(DQN, self).__init__()
         layers = [nn.Linear(state_size, 32, bias=False), nn.Linear(32, 32, bias=False),
                   nn.Linear(32, action_size, bias=False)]
@@ -40,7 +40,7 @@ class Memory(object):
         self.ready = False
         self.position = 0
         self.state_memory = np.zeros((size, state_size))
-        self.action_memroy = np.zeros((size, 1))
+        self.action_memory = np.zeros((size, 1))
         self.reward_memory = np.zeros((size, 1))
         self.next_state_memory = np.zeros((size, state_size))
         self.done_memory = np.zeros((size, 1))
@@ -48,7 +48,7 @@ class Memory(object):
     def store(self, state, action, reward, next_state, done):
         position = self.position % self.size
         self.state_memory[position, :] = state
-        self.action_memroy[position, :] = action
+        self.action_memory[position, :] = action
         self.reward_memory[position, :] = reward
         # print(next_state)
         # print(done)
@@ -63,7 +63,7 @@ class Memory(object):
     def get_batch_memory(self, batch_size):
         idx = np.random.randint(low=self.size, size=batch_size)
         batch_memo_state = self.state_memory[idx, :]
-        batch_memo_action = self.action_memroy[idx, :]
+        batch_memo_action = self.action_memory[idx, :]
         batch_memo_reward = self.reward_memory[idx, :]
         batch_memo_next_state = self.next_state_memory[idx, :]
         batch_memo_done = self.done_memory[idx, :]
@@ -77,6 +77,7 @@ class Memory(object):
                 next_state, reward, done, _ = env.step(action)
                 self.store(state, action, reward, next_state, done)
                 step = self.position
+                state = next_state
                 if step % 1000 == 0:
                     print("{} pieces of memo have been created".format(step))
                 if done or memo.ready:
@@ -112,9 +113,9 @@ def plot_durations():
 
     plt.pause(0.001)  # pause a bit so that plots are updated
 
-net = DQN()
+net = DQN(state_size, action_size)
 memo = Memory(memo_size)
-optimizer = optim.RMSprop(net.net.parameters())
+optimizer = optim.Adam(net.net.parameters(),lr)
 
 
 def batch_train(net, memo, batch_size):
@@ -124,17 +125,19 @@ def batch_train(net, memo, batch_size):
     undone_mask_idx = ((done == 0))
     y = torch.zeros(batch_size, 1)
     y[done_mask_idx] = torch.as_tensor(reward[done_mask_idx], dtype=torch.float32)
-    # print(self.net.evaluate(state[undone_mask_idx]))
-    # print(done)
     with torch.no_grad():
         y[undone_mask_idx] = torch.as_tensor(reward[undone_mask_idx], dtype=torch.float32) + (
         torch.max(gamma * net.evaluate(next_state[undone_mask_idx, :]), 1)[0]).unsqueeze(1)
     state_action_value = net.evaluate(state).gather(1, torch.as_tensor(action, dtype=torch.long))
-    loss = F.smooth_l1_loss(state_action_value, y)
+    loss = -F.smooth_l1_loss(state_action_value, y)
 
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+    # with torch.no_grad():
+    #     state_action_value = net.evaluate(state).gather(1, torch.as_tensor(action, dtype=torch.long))
+    #     loss_after = F.smooth_l1_loss(state_action_value, y)
+    # loss_step = loss-loss_after
 
 
 memo.fill_memo()
@@ -143,13 +146,16 @@ for i in range(5000):
     reward_array = []
     episode_reward = 0
     step_count = 0
+    start_record = False
     while True:
         with torch.no_grad():
             q_table = net.evaluate(state)
         action = select_action(q_table)
         next_state, reward, done, _ = env.step(action)
+        # env.render()
         episode_reward += reward
         memo.store(state, action, reward, next_state, done)
+        state = next_state
         step_count += 1
         if done:
             break
@@ -157,5 +163,7 @@ for i in range(5000):
             break
         if memo.ready:
             batch_train(net, memo, batch_size)
-    episode_durations.append(step_count)
-    plot_durations()
+            start_record = True
+    if start_record:
+        episode_durations.append(step_count)
+        plot_durations()

@@ -1,35 +1,39 @@
+import random
+
 import gym
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-import random
-import matplotlib.pyplot as plt
-import numpy as np
 
 env = gym.make("CartPole-v0")
+env = env.unwrapped
 state_size = env.observation_space.shape[0]
 action_size = env.action_space.n
-lr = 1e-3
+lr = 1e-2
 epsilon = 0.9
-memo_size = 10000
+memo_size = 2000
 episode = 50
 step_limit = 5000
 gamma = 0.5
-batch_size = 128
-
+batch_size = 32
+TARGET_UPDATE_RATE = 100
 
 class DQN(nn.Module):
 
-    def __init__(self,state_size, action_size):
+    def __init__(self, state_size, action_size):
         super(DQN, self).__init__()
-        layers = [nn.Linear(state_size, 32, bias=False), nn.Linear(32, 32, bias=False),
-                  nn.Linear(32, action_size, bias=False)]
-        self.net = nn.Sequential(*layers)
+        self.fc1 = nn.Linear(state_size, 50)
+        self.fc1.weight.data.normal_(0, 0.1)  # initialization
+        self.out = nn.Linear(50, action_size)
+        self.out.weight.data.normal_(0, 0.1)  # initialization
 
-    def evaluate(self, state):
-        q_table = self.net(torch.as_tensor(state, dtype=torch.float32))
-        return q_table
+    def forward(self, state):
+        x = self.fc1(state)
+        x = F.relu(x)
+        return self.out(x)
 
 
 class Memory(object):
@@ -54,7 +58,6 @@ class Memory(object):
         # print(done)
         self.next_state_memory[position, :] = next_state
         self.done_memory[position, :] = done
-        position += 1
         self.position += 1
         self.position = self.position % 1000000
         if self.position > self.size:
@@ -80,9 +83,9 @@ class Memory(object):
                 state = next_state
                 if step % 1000 == 0:
                     print("{} pieces of memo have been created".format(step))
-                if done or memo.ready:
+                if done or self.ready:
                     break
-            if memo.ready:
+            if self.ready:
                 break
 
 
@@ -115,34 +118,37 @@ def plot_durations():
 
     plt.pause(0.001)  # pause a bit so that plots are updated
 
+
 net = DQN(state_size, action_size)
+target = DQN(state_size, action_size)
 memo = Memory(memo_size)
-optimizer = optim.Adam(net.net.parameters(),lr)
+optimizer = optim.Adam(net.parameters(), lr)
+loss_func = nn.MSELoss()
 
 
-def batch_train(net, memo, batch_size):
+def batch_train(net, target, memo, batch_size):
     state, action, reward, next_state, done = memo.get_batch_memory(batch_size)
-    done = np.squeeze(done)
-    done_mask_idx = ((done == 1))
-    undone_mask_idx = ((done == 0))
-    y = torch.zeros(batch_size, 1)
-    y[done_mask_idx] = torch.as_tensor(reward[done_mask_idx], dtype=torch.float32)
-    with torch.no_grad():
-        y[undone_mask_idx] = torch.as_tensor(reward[undone_mask_idx], dtype=torch.float32) + (
-        torch.max(gamma * net.evaluate(next_state[undone_mask_idx, :]), 1)[0]).unsqueeze(1)
-    state_action_value = net.evaluate(state).gather(1, torch.as_tensor(action, dtype=torch.long))
-    loss = -F.smooth_l1_loss(state_action_value, y)
+    state = torch.FloatTensor(state)                            # [batch_size,state_size]
+    next_state = torch.FloatTensor(next_state)                  # [batch_size,state_size]
+    reward = torch.FloatTensor(reward)                          # [batch_size,1]
+    action = torch.LongTensor(action)
+    done = torch.BoolTensor(done).squeeze()                     # [batch_size]
+    done_mask_idx = (done == 1)
+    undone_mask_idx = (done == 0)
+    y = torch.zeros(batch_size, 1)                              # [batch_size,1]
+    y[done_mask_idx] = reward[done_mask_idx]
+    y[undone_mask_idx] = reward[undone_mask_idx] + (
+        torch.max(gamma * target(next_state[undone_mask_idx]).detach(), 1)[0]).unsqueeze(1)
+    state_action_value = net(state).gather(1, action)
+    loss = loss_func(state_action_value, y)
 
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-    # with torch.no_grad():
-    #     state_action_value = net.evaluate(state).gather(1, torch.as_tensor(action, dtype=torch.long))
-    #     loss_after = F.smooth_l1_loss(state_action_value, y)
-    # loss_step = loss-loss_after
 
 
 memo.fill_memo()
+total_step_count = 0
 for i in range(5000):
     state = env.reset()
     reward_array = []
@@ -150,21 +156,25 @@ for i in range(5000):
     step_count = 0
     start_record = False
     while True:
-        with torch.no_grad():
-            q_table = net.evaluate(state)
+        q_table = net(torch.FloatTensor(state).unsqueeze(0)).detach()
         action = select_action(q_table)
         next_state, reward, done, _ = env.step(action)
         # env.render()
+        x, x_dot, theta, theta_dot = next_state
+        r1 = (env.x_threshold - abs(x)) / env.x_threshold - 0.8
+        r2 = (env.theta_threshold_radians - abs(theta)) / env.theta_threshold_radians - 0.5
+        reward = r1 + r2
         episode_reward += reward
         memo.store(state, action, reward, next_state, done)
         state = next_state
         step_count += 1
+        total_step_count += 1
+        if total_step_count % TARGET_UPDATE_RATE == 0:
+            target.load_state_dict(net.state_dict())
         if done:
             break
-        if step_count > step_limit:
-            break
         if memo.ready:
-            batch_train(net, memo, batch_size)
+            batch_train(net, target, memo, batch_size)
             start_record = True
     if start_record:
         episode_durations.append(step_count)

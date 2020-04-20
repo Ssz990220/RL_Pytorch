@@ -121,13 +121,12 @@ def plot_durations():
 
 
 net = DQN(state_size, action_size)
-target = DQN(state_size, action_size)
 memo = Memory(memo_size)
 optimizer = optim.Adam(net.parameters(), lr)
 loss_func = nn.MSELoss()
 
 
-def batch_train(net, target, memo, batch_size):
+def batch_train(net, memo, batch_size):
     state, action, reward, next_state, done = memo.get_batch_memory(batch_size)
     state = torch.FloatTensor(state)  # [batch_size,state_size]
     next_state = torch.FloatTensor(next_state)  # [batch_size,state_size]
@@ -139,7 +138,7 @@ def batch_train(net, target, memo, batch_size):
     y = torch.zeros(batch_size, 1)  # [batch_size,1]
     y[done_mask_idx] = reward[done_mask_idx]
     y[undone_mask_idx] = reward[undone_mask_idx] + (
-        torch.max(gamma * target(next_state[undone_mask_idx]).detach(), 1)[0]).unsqueeze(1)
+        torch.max(gamma * net(next_state[undone_mask_idx]).detach(), 1)[0]).unsqueeze(1)
     state_action_value = net(state).gather(1, action)
     loss = loss_func(state_action_value, y)
 
@@ -170,12 +169,10 @@ for i in range(5000):
         state = next_state
         step_count += 1
         total_step_count += 1
-        if total_step_count % TARGET_UPDATE_RATE == 0:
-            target.load_state_dict(net.state_dict())
         if done:
             break
         if memo.ready:
-            batch_train(net, target, memo, batch_size)
+            batch_train(net, memo, batch_size)
             start_record = True
     if start_record:
         episode_durations.append(step_count)

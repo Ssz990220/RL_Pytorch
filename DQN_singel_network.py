@@ -117,7 +117,7 @@ def plot_durations():
         means = torch.cat((torch.zeros(99), means))
         plt.plot(means.numpy())
 
-    plt.pause(0.001)  # pause a bit so that plots are updated
+    plt.pause(0.0001)  # pause a bit so that plots are updated
 
 
 net = DQN(state_size, action_size)

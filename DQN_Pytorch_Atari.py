@@ -1,31 +1,35 @@
-import gym
-import torch
-import torch.nn as nn
-import cv2
-import torch.optim as optim
-import torch.nn.functional as F
 import random
+
+import cv2
+import gym
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 
 env = gym.make("Pong-v0")
-state_size = env.observation_space.shape[0]
-action_size = env.action_space.n
-lr = 3e-3
-epsilon = 0.9
-memo_size = 10000
-episode = 50
-step_limit = 5000
-gamma = 0.999
-batch_size = 32
+STATE_SIZE = env.observation_space.shape
+ACTION_SIZE = env.action_space.n
+LR = 3e-3
+EPSILON = 0.9
+MEMORY_SIZE = 2000
+EPISODE = 50
+STEP_LIMIT = 5000
+GAMMA = 0.999
+BATCH_SIZE = 32
+HISTORY_LENGTH = 4
+TARGET_UPDATE_RATE = 100
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class DQN(nn.Module):
+class Net(nn.Module):
 
-    def __init__(self, h, w, output_size):
-        super(DQN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=5, stride=2)
+    def __init__(self, h, w, action_size):
+        super(Net, self).__init__()
+
+        self.conv1 = nn.Conv2d(HISTORY_LENGTH, 16, kernel_size=5, stride=2)
         self.bn1 = nn.BatchNorm2d(16)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=5, stride=2)
         self.bn2 = nn.BatchNorm2d(32)
@@ -35,18 +39,17 @@ class DQN(nn.Module):
         def conv2d_size_out(size, kernel_size=5, stride=2):
             return (size - (kernel_size - 1) - 1) // stride + 1
 
-        out_w = conv2d_size_out(conv2d_size_out(conv2d_size_out(w)))
-        out_h = conv2d_size_out(conv2d_size_out(conv2d_size_out(h)))
-        self.fc1 = nn.Linear(out_w * out_h * 32, 128)
-        self.fc2 = nn.Linear(128, output_size)
+        convw = conv2d_size_out(conv2d_size_out(conv2d_size_out(w)))
+        convh = conv2d_size_out(conv2d_size_out(conv2d_size_out(h)))
+        self.fc1 = nn.Linear(convh * convw * 32, 128)
+        self.fc2 = nn.Linear(128, action_size)
 
-    def forward(self, x):
-        x = x.to(device)
-        x = F.relu(self.bn1(self.conv1(x)))
+    def forward(self, state):
+        x = F.relu(self.bn1(self.conv1(state)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
-        x = self.fc1(x.view(x.size(0), -1))
-        return self.fc2(x).to('cpu')
+        x = F.relu(self.fc1(x.view(x.size(0), -1)))
+        return self.fc2(x)
 
 
 class Memory(object):
@@ -55,22 +58,23 @@ class Memory(object):
         super(Memory, self).__init__()
         self.size = size
         self.ready = False
+        self.state_size = state_size
         self.position = 0
-        self.state_memory = np.zeros((size, 1, state_size[0], state_size[1]))
-        self.action_memroy = np.zeros((size, 1))
-        self.reward_memory = np.zeros((size, 1))
-        self.next_state_memory = np.zeros((size, 1, state_size[0], state_size[1]))
-        self.done_memory = np.zeros((size, 1))
+        self.state_memory = torch.zeros((size, HISTORY_LENGTH, state_size[0], state_size[1])).to(device)
+        self.action_memory = torch.zeros((size, 1))
+        self.reward_memory = torch.zeros((size, 1)).to(device)
+        self.next_state_memory = torch.zeros((size, HISTORY_LENGTH, state_size[0], state_size[1])).to(device)
+        self.done_memory = torch.zeros((size, 1))
 
     def store(self, state, action, reward, next_state, done):
         position = self.position % self.size
-        self.state_memory[position, :] = state
-        self.action_memroy[position, :] = action
-        self.reward_memory[position, :] = reward
+        self.state_memory[position, :] = torch.FloatTensor(state)
+        self.action_memory[position, :] = torch.LongTensor([action])
+        self.reward_memory[position, :] = torch.FloatTensor([reward])
         # print(next_state)
         # print(done)
-        self.next_state_memory[position, :] = next_state
-        self.done_memory[position, :] = done
+        self.next_state_memory[position, :] = torch.FloatTensor(next_state)
+        self.done_memory[position, :] = torch.LongTensor([done])
         position += 1
         self.position += 1
         self.position = self.position % 1000000
@@ -78,29 +82,74 @@ class Memory(object):
             self.ready = True
 
     def get_batch_memory(self, batch_size):
-        idx = np.random.randint(low=self.size, size=batch_size)
+        idx = torch.IntTensor(np.random.randint(low=self.size, size=batch_size))
         batch_memo_state = self.state_memory[idx, :]
-        batch_memo_action = self.action_memroy[idx, :]
+        batch_memo_action = self.action_memory[idx, :]
         batch_memo_reward = self.reward_memory[idx, :]
         batch_memo_next_state = self.next_state_memory[idx, :]
         batch_memo_done = self.done_memory[idx, :]
         return batch_memo_state, batch_memo_action, batch_memo_reward, batch_memo_next_state, batch_memo_done
 
+    def init_state_bundle(self):
+        init = False
+        while not init:
+            state = env.reset()
+            state = pre_process(state)
+            state_bundle = np.zeros([HISTORY_LENGTH, self.state_size[0], self.state_size[1]])
+            state_bundle[1, :] = state
+            next_state_bundle = np.zeros([HISTORY_LENGTH, self.state_size[0], self.state_size[1]])
+            action = 1
+            for i in range(4):
+                next_state, reward, done, _ = env.step(action)
+                action = env.action_space.sample()
+                next_state = pre_process(next_state)
+                state_bundle[i, :] = state
+                next_state_bundle[i, :] = next_state
+                state = next_state
+                if done and i < 3:
+                    break
+                if i == 3 and not done:
+                    init = True
+                    return state_bundle, next_state_bundle
+
     def fill_memo(self):
         while True:
             state = env.reset()
             state = pre_process(state)
+            state_bundle = np.zeros([HISTORY_LENGTH, self.state_size[0], self.state_size[1]])
+            state_bundle[1, :] = state
+            next_state_bundle = np.zeros([HISTORY_LENGTH, self.state_size[0], self.state_size[1]])
+            init = False
             while True:
+                if not init:
+                    for i in range(4):
+                        action = env.action_space.sample()
+                        next_state, reward, done, _ = env.step(action)
+                        next_state = pre_process(next_state)
+                        state_bundle[i, :] = state
+                        next_state_bundle[i, :] = next_state
+                        state = next_state
+                        if done and i < 3:
+                            break
+                        if i == 3:
+                            self.store(state_bundle, action, reward, next_state_bundle, done)
+                            init = True
+                if done or not init:
+                    break
                 action = env.action_space.sample()
                 next_state, reward, done, _ = env.step(action)
                 next_state = pre_process(next_state)
+                state_bundle[0:HISTORY_LENGTH - 2, :] = state_bundle[1:HISTORY_LENGTH - 1, :]
+                state_bundle[-1, :] = state
+                next_state_bundle[0:HISTORY_LENGTH - 2, :] = next_state_bundle[1:HISTORY_LENGTH - 1, :]
+                next_state_bundle[-1, :] = next_state
                 self.store(state, action, reward, next_state, done)
                 step = self.position
                 if step % 1000 == 0:
                     print("{} pieces of memo have been created".format(step))
-                if done or memo.ready:
+                if done or self.ready:
                     break
-            if memo.ready:
+            if self.ready:
                 break
 
 
@@ -113,19 +162,21 @@ def pre_process(observation):
 
 def select_action(Q_table):
     sample = random.random()
-    if sample < epsilon:
-        return Q_table.argmax().item()
+    if sample < EPISODE:
+        with torch.no_grad():
+            action = Q_table.argmax().item()
+        return action
     else:
-        return random.randint(0, action_size - 1)
+        return random.randint(0, ACTION_SIZE - 1)
 
 
-episode_reward_array = []
+episode_durations = []
 
 
-def plot_rewards():
+def plot_durations():
     plt.figure(2)
     plt.clf()
-    durations_t = torch.tensor(episode_reward_array, dtype=torch.float)
+    durations_t = torch.tensor(episode_durations, dtype=torch.float)
     plt.title('Training...')
     plt.xlabel('Episode')
     plt.ylabel('Duration')
@@ -139,54 +190,63 @@ def plot_rewards():
     plt.pause(0.001)  # pause a bit so that plots are updated
 
 
-net = DQN(w=84, h=84, output_size=env.action_space.n).to(device)
-memo = Memory(memo_size, state_size=[84, 84])
-optimizer = optim.RMSprop(net.parameters())
+def hubor_loss():
+    return 0
 
 
-def batch_train(net, memo, batch_size):
+net = Net(84, 84, ACTION_SIZE).to(device)
+target = Net(84, 84, ACTION_SIZE).to(device)
+memo = Memory(MEMORY_SIZE,[84,84])
+optimizer = optim.Adam(net.parameters(), LR)
+loss_func = hubor_loss()
+
+
+def batch_train(net, target, memo, batch_size):
     state, action, reward, next_state, done = memo.get_batch_memory(batch_size)
-    done = np.squeeze(done)
-    done_mask_idx = ((done == 1))
-    undone_mask_idx = ((done == 0))
-    y = torch.zeros(batch_size, 1)
-    y[done_mask_idx] = torch.as_tensor(reward[done_mask_idx], dtype=torch.float32)
-    # print(self.net.evaluate(state[undone_mask_idx]))
-    # print(done)
-    with torch.no_grad():
-        y[undone_mask_idx] = torch.as_tensor(reward[undone_mask_idx], dtype=torch.float32) + (
-            torch.max(gamma * net(torch.as_tensor(next_state[undone_mask_idx, :], dtype=torch.float32)), 1)[
-                0]).unsqueeze(1)
-    state_action_value = net(torch.as_tensor(state, dtype=torch.float32)).gather(1, torch.as_tensor(action,
-                                                                                                    dtype=torch.long))
-    loss = F.smooth_l1_loss(state_action_value, y)
+    done_mask_idx = (done == 1)
+    undone_mask_idx = (done == 0)
+    y = torch.zeros(batch_size, 1)  # [batch_size,1]
+    y[done_mask_idx] = reward[done_mask_idx]
+    y[undone_mask_idx] = reward[undone_mask_idx] + (
+        torch.max(GAMMA * target(next_state[undone_mask_idx]).detach(), 1)[0]).unsqueeze(1)
+    state_action_value = net(state).gather(1, action)
+    loss = loss_func(state_action_value, y)
 
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
 
 
+
 memo.fill_memo()
+total_step_count = 0
 for i in range(5000):
-    state = env.reset()
-    state = pre_process(state)
+    state_bundle, next_state_bundle = memo.init_state_bundle()
+    state_bundle = torch.FloatTensor(state_bundle).to(device)
+    next_state_bundle = torch.FloatTensor(next_state_bundle).to(device)
     reward_array = []
     episode_reward = 0
     step_count = 0
+    start_record = False
     while True:
-        with torch.no_grad():
-            q_table = net(state)
+        q_table = net(state_bundle.unsqueeze(0)).detach()
         action = select_action(q_table)
         next_state, reward, done, _ = env.step(action)
-        episode_reward += reward
         next_state = pre_process(next_state)
-        memo.store(state, action, reward, next_state, done)
+        next_state_bundle[0:HISTORY_LENGTH - 2, :] = next_state_bundle[1:HISTORY_LENGTH - 1, :]
+        next_state_bundle[-1, :] = next_state
+        state_bundle = next_state_bundle
+        episode_reward += reward
+        memo.store(state_bundle, action, reward, next_state_bundle, done)
         step_count += 1
+        total_step_count += 1
+        if total_step_count % TARGET_UPDATE_RATE == 0:
+            target.load_state_dict(net.state_dict())
         if done:
             break
-        if step_count > step_limit:
-            break
         if memo.ready:
-            batch_train(net, memo, batch_size)
-    episode_reward_array.append(episode_reward)
-    plot_rewards()
+            batch_train(net, target, memo, BATCH_SIZE)
+            start_record = True
+    if start_record:
+        episode_durations.append(step_count)
+        plot_durations()

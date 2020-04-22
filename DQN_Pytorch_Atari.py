@@ -14,9 +14,8 @@ STATE_SIZE = env.observation_space.shape
 ACTION_SIZE = env.action_space.n
 LR = 3e-3
 EPSILON = 0.9
-MEMORY_SIZE = 2000
+MEMORY_SIZE = 10000
 EPISODE = 50
-STEP_LIMIT = 5000
 GAMMA = 0.999
 BATCH_SIZE = 32
 HISTORY_LENGTH = 4
@@ -61,7 +60,7 @@ class Memory(object):
         self.state_size = state_size
         self.position = 0
         self.state_memory = torch.zeros((size, HISTORY_LENGTH, state_size[0], state_size[1])).to(device)
-        self.action_memory = torch.zeros((size, 1))
+        self.action_memory = torch.zeros((size, 1), dtype=torch.long).to(device)
         self.reward_memory = torch.zeros((size, 1)).to(device)
         self.next_state_memory = torch.zeros((size, HISTORY_LENGTH, state_size[0], state_size[1])).to(device)
         self.done_memory = torch.zeros((size, 1))
@@ -82,7 +81,7 @@ class Memory(object):
             self.ready = True
 
     def get_batch_memory(self, batch_size):
-        idx = torch.IntTensor(np.random.randint(low=self.size, size=batch_size))
+        idx = torch.LongTensor(np.random.randint(low=self.size, size=batch_size)).to(device)
         batch_memo_state = self.state_memory[idx, :]
         batch_memo_action = self.action_memory[idx, :]
         batch_memo_reward = self.reward_memory[idx, :]
@@ -196,16 +195,18 @@ def hubor_loss():
 
 net = Net(84, 84, ACTION_SIZE).to(device)
 target = Net(84, 84, ACTION_SIZE).to(device)
-memo = Memory(MEMORY_SIZE,[84,84])
+memo = Memory(MEMORY_SIZE, [84, 84])
 optimizer = optim.Adam(net.parameters(), LR)
-loss_func = hubor_loss()
+# loss_func = hubor_loss()
+
+loss_func = nn.MSELoss()
 
 
 def batch_train(net, target, memo, batch_size):
     state, action, reward, next_state, done = memo.get_batch_memory(batch_size)
-    done_mask_idx = (done == 1)
-    undone_mask_idx = (done == 0)
-    y = torch.zeros(batch_size, 1)  # [batch_size,1]
+    done_mask_idx = (done == 1).squeeze()
+    undone_mask_idx = (done == 0).squeeze()
+    y = torch.zeros(batch_size, 1).to(device)  # [batch_size,1]
     y[done_mask_idx] = reward[done_mask_idx]
     y[undone_mask_idx] = reward[undone_mask_idx] + (
         torch.max(GAMMA * target(next_state[undone_mask_idx]).detach(), 1)[0]).unsqueeze(1)
@@ -217,19 +218,19 @@ def batch_train(net, target, memo, batch_size):
     optimizer.step()
 
 
-
 memo.fill_memo()
 total_step_count = 0
 for i in range(5000):
     state_bundle, next_state_bundle = memo.init_state_bundle()
-    state_bundle = torch.FloatTensor(state_bundle).to(device)
-    next_state_bundle = torch.FloatTensor(next_state_bundle).to(device)
+    # state_bundle = torch.FloatTensor(state_bundle).to(device)
+    # next_state_bundle = torch.FloatTensor(next_state_bundle).to(device)
     reward_array = []
     episode_reward = 0
     step_count = 0
     start_record = False
     while True:
-        q_table = net(state_bundle.unsqueeze(0)).detach()
+        q_table = net(torch.FloatTensor(state_bundle).unsqueeze(0).to(device)).detach()
+        env.render()
         action = select_action(q_table)
         next_state, reward, done, _ = env.step(action)
         next_state = pre_process(next_state)

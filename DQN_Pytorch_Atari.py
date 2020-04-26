@@ -8,8 +8,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from wrapper import *
 
-env = gym.make("Pong-v0")
+env = gym.make("Pong-v4")
+# env = make_env(env)
 STATE_SIZE = env.observation_space.shape
 ACTION_SIZE = env.action_space.n
 LR = 3e-3
@@ -216,6 +218,7 @@ def batch_train(net, target, memo, batch_size):
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+    return loss
 
 
 memo.fill_memo()
@@ -228,9 +231,10 @@ for i in range(5000):
     episode_reward = 0
     step_count = 0
     start_record = False
+    epoch = 0
     while True:
         q_table = net(torch.FloatTensor(state_bundle).unsqueeze(0).to(device)).detach()
-        env.render()
+        # env.render()
         action = select_action(q_table)
         next_state, reward, done, _ = env.step(action)
         next_state = pre_process(next_state)
@@ -243,11 +247,19 @@ for i in range(5000):
         total_step_count += 1
         if total_step_count % TARGET_UPDATE_RATE == 0:
             target.load_state_dict(net.state_dict())
+        # if total_step_count % 100 == 0:
+        #     torch.save({
+        #         'epoch': epoch,
+        #         'model_state_dict': net.state_dict(),
+        #         'optimizer_state_dict': optimizer.state_dict(),
+        #         'loss': loss
+        #     }, PATH)
         if done:
+            epoch += 1
             break
         if memo.ready:
-            batch_train(net, target, memo, BATCH_SIZE)
+            loss = batch_train(net, target, memo, BATCH_SIZE)
             start_record = True
     if start_record:
-        episode_durations.append(step_count)
+        episode_durations.append(episode_reward)
         plot_durations()

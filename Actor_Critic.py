@@ -6,10 +6,10 @@ import torch.nn.functional as F
 import math
 from torch.distributions import Categorical
 
-env = gym.make('LunarLander-v2')
+# env = gym.make('LunarLander-v2')
 # env = gym.make('MountainCar-v0')
-# env = gym.make('CartPole-v0')
-# env.unwrapped
+env = gym.make('CartPole-v0')
+env.unwrapped
 state_size = env.observation_space.shape[0]
 action_size = env.action_space.n
 LR = 1e-3
@@ -92,6 +92,14 @@ for ep in range(MAX_EPISODE):
         env.render()
         action = actor.get_action(torch.as_tensor(state, dtype=torch.float32).unsqueeze(0))
         next_state, reward, done, _ = env.step(action)
+
+        ### for CartPole
+        x, x_dot, theta, theta_dot = next_state
+        r1 = (env.x_threshold - abs(x)) / env.x_threshold - 0.8
+        r2 = (env.theta_threshold_radians - abs(theta)) / env.theta_threshold_radians - 0.5
+        reward = r1 + r2
+        ###
+
         # reward = reward / 10  # Morvan Zhou
         td_error = critic.learn(torch.as_tensor(state, dtype=torch.float32),
                                 torch.as_tensor(reward, dtype=torch.float32),
